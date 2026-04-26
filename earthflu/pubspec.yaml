@@ -7,6 +7,8 @@ environment:
   sdk: ^3.11.5
 
 dependencies:
+  cloud_firestore: ^6.3.0
+  firebase_core: ^4.7.0
   flutter:
     sdk: flutter
   flutter_map: ^6.0.0 # Harita motoru
