@@ -4,8 +4,11 @@ import 'package:latlong2/latlong.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter_map_tile_caching/flutter_map_tile_caching.dart';
+import 'dart:async'; // Stream için gerekli
+
 import '../services/firebase_service.dart';
 import '../services/location_cache_service.dart';
+import '../services/location_service.dart'; // YENİ SERVİSİNİ EKLEDİK
 
 class CampusMapScreen extends StatefulWidget {
   const CampusMapScreen({super.key});
@@ -18,12 +21,20 @@ class _CampusMapScreenState extends State<CampusMapScreen> {
   // --- SERVİSLER ---
   final LocationCacheService _cacheService = LocationCacheService();
   final FirebaseService _firebaseService = FirebaseService();
+  final LocationService _locationService = LocationService(); // YENİ SERVİS
 
-  // --- KONUM DEĞİŞKENLERİ ---
-  LatLng? myLiveLocation; // Kendi CANLI konumumuz (Senin kodun)
-  LatLng _cachedMapPosition = const LatLng(40.7410, 30.3330); // Önbellek / Varsayılan (Arkadaşının kodu)
-  
-  bool _isSimulating = false; // Butonun bekleme durumu
+  // --- DEĞİŞKENLER ---
+  LatLng? myLiveLocation;
+  LatLng _cachedMapPosition = const LatLng(40.7410, 30.3330);
+  bool _isSimulating = false;
+
+  // GÖREV 2: Uygulamayı İşlevsiz Bırakma Kilidi
+  bool _hasLocationPermission = true;
+
+  bool _sosSent = false; // Kullanıcı sinyal gönderdi mi?
+
+  // Canlı GPS Dinleyicisi
+  StreamSubscription<Position>? _positionStreamSubscription;
 
   @override
   void initState() {
@@ -31,65 +42,77 @@ class _CampusMapScreenState extends State<CampusMapScreen> {
     _initializeLocationSystem();
   }
 
-  // Hem önbelleği hem canlı GPS'i sırayla başlatan Voltran Fonksiyonu
-  Future<void> _initializeLocationSystem() async {
-    await _loadLastKnownLocation(); // 1. Önce önbelleği yükle (Harita hemen açılsın)
-    await _determinePosition();     // 2. Ardından canlı GPS'i bulup haritayı güncelle
+  @override
+  void dispose() {
+    _positionStreamSubscription?.cancel(); // Bellek sızıntısını önlemek için
+    super.dispose();
   }
 
-  // --- ARKADAŞININ FONKSİYONU: Önbellekten Konum Yükleme ---
+  // Hem önbelleği hem canlı GPS'i sırayla başlatan sistem
+  Future<void> _initializeLocationSystem() async {
+    await _loadLastKnownLocation();
+    await _determinePosition();
+  }
+
   Future<void> _loadLastKnownLocation() async {
     final lastPos = await _cacheService.getOfflineLocation();
     if (lastPos != null) {
       setState(() {
         _cachedMapPosition = lastPos;
       });
-      print("💾 WATCHMAN: Önbellekten son konum yüklendi: ${lastPos.latitude}, ${lastPos.longitude}");
     }
   }
 
-  // --- SENİN FONKSİYONUN: Canlı GPS Alma ---
+  // --- GÜNCELLENEN FONKSİYON: İzin Kontrolü ve Optimize Canlı Takip ---
   Future<void> _determinePosition() async {
-    bool serviceEnabled = await Geolocator.isLocationServiceEnabled();
-    if (!serviceEnabled) return;
+    // 1. İZİN KONTROLÜ (GÖREV 2)
+    bool hasPermission = await _locationService.checkAndRequestPermission();
 
-    LocationPermission permission = await Geolocator.checkPermission();
-    if (permission == LocationPermission.denied) {
-      permission = await Geolocator.requestPermission();
-      if (permission == LocationPermission.denied) return;
+    setState(() {
+      _hasLocationPermission = hasPermission;
+    });
+
+    // GUARD YAPISI: İzin yoksa fonksiyonu tamamen durdur.
+    if (!hasPermission) {
+      print("🚨 GUARD: İzin verilmedi, sistem kilitlendi.");
+      return;
     }
 
-    Position position = await Geolocator.getCurrentPosition();
-    print("📍 DEDEKTİF: GPS Konumu başarıyla alındı! Enlem: ${position.latitude}, Boylam: ${position.longitude}");
-    
-    setState(() {
-      myLiveLocation = LatLng(position.latitude, position.longitude);
-      _cachedMapPosition = myLiveLocation!; // Canlı konum gelince varsayılanı da güncelle
+    // 2. ENERJİ OPTİMİZASYONLU CANLI TAKİP (GÖREV 1 ve 4)
+    // Sadece ilk konumu almak yerine kullanıcının 25 metre hareket etmesini dinliyoruz.
+    _positionStreamSubscription = _locationService.getOptimizedLocationStream().listen((Position position) {
+      print("📍 DEDEKTİF (OPTİMİZE): GPS Konumu Güncellendi! ${position.latitude}, ${position.longitude}");
+
+      setState(() {
+        myLiveLocation = LatLng(position.latitude, position.longitude);
+        _cachedMapPosition = myLiveLocation!; // Merkeze al
+      });
     });
   }
 
-  // --- ARKADAŞININ FONKSİYONU: Deprem Simülasyonu (SOS Butonu) ---
   Future<void> _simulateEmergency() async {
     setState(() => _isSimulating = true);
 
     try {
-      // Sinyali atarken CANLI konum varsa onu kullan, yoksa ÖNBELLEKTEKİ konumu kullan
       final targetPos = myLiveLocation ?? _cachedMapPosition;
-      
-      // Firebase'e sinyal gönder (Grup ID'sini senin dinlediğin ile aynı yaptık ki haritada görünsün)
+
       await _firebaseService.sendEmergencyPing(
-        "demo_user_ali", 
-        "aile_grubu_1", // Önceden 'sakarya_ekibi'ydi, haritada görünsün diye eşitledik!
-        targetPos.latitude, 
-        targetPos.longitude
+          "demo_user_ali",
+          "aile_grubu_1",
+          targetPos.latitude,
+          targetPos.longitude
       );
+
+      // SİNYAL BAŞARIYLA GİTTİĞİNDE DURUMU GÜNCELLE
+      setState(() {
+        _sosSent = true;
+      });
 
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text("ACİL DURUM SİNYALİ GÖNDERİLDİ! (Lat: ${targetPos.latitude.toStringAsFixed(4)})"),
-            backgroundColor: Colors.red,
-            duration: const Duration(seconds: 3),
+          const SnackBar(
+            content: Text("DURUMUNUZ BİLDİRİLDİ! Artık diğerlerini görebilirsiniz."),
+            backgroundColor: Colors.green,
           ),
         );
       }
@@ -106,28 +129,58 @@ class _CampusMapScreenState extends State<CampusMapScreen> {
 
   @override
   Widget build(BuildContext context) {
-    // Haritanın merkezini belirliyoruz (Canlı konum varsa o, yoksa önbellek)
+    // --- GÖREV 2: İZİN YOKSA UYGULAMAYI İŞLEVSİZ BIRAKMA (KİLİT EKRANI) ---
+    if (!_hasLocationPermission) {
+      return Scaffold(
+        body: Center(
+          child: Padding(
+            padding: const EdgeInsets.all(20.0),
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                const Icon(Icons.location_off, size: 80, color: Colors.red),
+                const SizedBox(height: 20),
+                const Text(
+                  "Konum İzni Gerekli!",
+                  style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
+                ),
+                const SizedBox(height: 10),
+                const Text(
+                  "Afet anında size ulaşılabilmesi için bu uygulamanın konum iznine 'Her Zaman' veya 'Kullanırken' şeklinde izin vermelisiniz. Aksi takdirde uygulama kullanılamaz.",
+                  textAlign: TextAlign.center,
+                ),
+                const SizedBox(height: 30),
+                ElevatedButton.icon(
+                  onPressed: _initializeLocationSystem,
+                  icon: const Icon(Icons.refresh),
+                  label: const Text("İzni Tekrar İste / Ayarları Aç"),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.red[800],
+                    foregroundColor: Colors.white,
+                  ),
+                )
+              ],
+            ),
+          ),
+        ),
+      );
+    }
+
+    // --- İZİN VARSA NORMAL HARİTA EKRANI ---
     final currentCenter = myLiveLocation ?? _cachedMapPosition;
 
     return Scaffold(
       appBar: AppBar(
-        title: const Text("Afet İletişim - Watchman Mode"),
+        title: const Text("Afet İletişim"),
         backgroundColor: Colors.red[800],
         foregroundColor: Colors.white,
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.refresh),
-            onPressed: _initializeLocationSystem, // Yenileye basınca hem GPS hem Önbellek güncellenir
-          )
-        ],
       ),
       body: StreamBuilder<QuerySnapshot>(
         stream: _firebaseService.getEmergencyPings("aile_grubu_1"),
         builder: (context, snapshot) {
-          
+
           List<Marker> allMarkers = [];
 
-          // 1. KENDİ KONUMUMUZ (Mavi Pin)
           allMarkers.add(
             Marker(
               point: currentCenter,
@@ -137,13 +190,18 @@ class _CampusMapScreenState extends State<CampusMapScreen> {
             ),
           );
 
-          // 2. FİREBASE'DEN GELEN ACİL DURUM SİNYALLERİ (Kırmızı Pinler)
-          if (snapshot.hasData) {
+          // 2. DİĞERLERİNİ GÖSTERME MANTIĞI (Filtreli)
+          // Şart: Sadece kullanıcı SOS gönderdiyse (_sosSent == true) göster
+          if (_sosSent && snapshot.hasData) {
             for (var doc in snapshot.data!.docs) {
               final data = doc.data() as Map<String, dynamic>;
 
-              // GeoPoint kontrolü (Senin mükemmel ajan çözümün)
-              if (data['location'] != null && data['location'] is GeoPoint) {
+              // KURAL 1: Gelen veri senin kendi user_id'n olmamalı (kırmızı pin gelmesin)
+              // KURAL 2: Veri bir GeoPoint olmalı
+              if (data['user_id'] != "demo_user_ali" &&
+                  data['location'] != null &&
+                  data['location'] is GeoPoint) {
+
                 GeoPoint geoPoint = data['location'];
 
                 allMarkers.add(
@@ -151,7 +209,6 @@ class _CampusMapScreenState extends State<CampusMapScreen> {
                     point: LatLng(geoPoint.latitude, geoPoint.longitude),
                     width: 50,
                     height: 50,
-                    // Titreşim hissi veren kırmızı afet ikonu
                     child: const Icon(Icons.warning, color: Colors.red, size: 40),
                   ),
                 );
@@ -168,24 +225,19 @@ class _CampusMapScreenState extends State<CampusMapScreen> {
               TileLayer(
                 urlTemplate: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
                 userAgentPackageName: 'com.example.earthflu',
-                tileProvider: FMTCStore('kampus_haritasi').getTileProvider(), // Çevrimdışı Harita Motorun
+                tileProvider: FMTCStore('kampus_haritasi').getTileProvider(),
               ),
               MarkerLayer(markers: allMarkers),
             ],
           );
         },
       ),
-      // --- DEPREM SİMÜLASYON BUTONU ---
       floatingActionButtonLocation: FloatingActionButtonLocation.centerFloat,
       floatingActionButton: FloatingActionButton.extended(
         onPressed: _isSimulating ? null : _simulateEmergency,
         backgroundColor: Colors.red,
         icon: _isSimulating
-            ? const SizedBox(
-                width: 20,
-                height: 20,
-                child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2),
-              )
+            ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2))
             : const Icon(Icons.warning_amber_rounded, color: Colors.white),
         label: Text(
           _isSimulating ? "SİNYAL GÖNDERİLİYOR..." : "DEPREM SİMÜLASYONU",
