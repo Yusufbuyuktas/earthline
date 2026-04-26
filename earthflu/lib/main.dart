@@ -1,20 +1,20 @@
 import 'package:flutter/material.dart';
+import 'screens/map_screen.dart'; // Eğer map_screen'i screens klasörüne koyduysan 'screens/map_screen.dart' yap
 
 void main() {
-  runApp(const MainApp());
+  runApp(MyApp());
 }
 
-class MainApp extends StatelessWidget {
-  const MainApp({super.key});
-
+class MyApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
-    return const MaterialApp(
-      home: Scaffold(
-        body: Center(
-          child: Text('Hello World!'),
-        ),
+    return MaterialApp(
+      debugShowCheckedModeBanner: false,
+      title: 'Afet Demo',
+      theme: ThemeData(
+        primarySwatch: Colors.red,
       ),
+      home: CampusMapScreen(), // İlk açılacak ekran senin haritan
     );
   }
 }
