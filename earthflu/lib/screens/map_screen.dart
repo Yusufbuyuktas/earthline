@@ -207,28 +207,60 @@ class _CampusMapScreenState extends State<CampusMapScreen> {
           );
 
           // 2. KIRMIZI PİNLER (DİĞERLERİ)
-          if (_sosSent && snapshot.hasData) {
-            for (var doc in snapshot.data!.docs) {
-              final data = doc.data() as Map<String, dynamic>;
+          if (_sosSent) {
+            Set<String> pingedUserIds = {};
 
-              // KRİTİK DÜZELTME: Veri tabanından gelen ID'yi metne çevirip karşılaştır
-              final String pingId = data['user_id'].toString();
+            if (snapshot.hasData) {
+              for (var doc in snapshot.data!.docs) {
+                final data = doc.data() as Map<String, dynamic>;
+                final String pingId = data['user_id'].toString();
 
-              if (pingId != _selectedUserId && data['location'] is GeoPoint) {
-                GeoPoint geoPoint = data['location'];
-                String markerName = "Kullanıcı";
+                if (pingId == _selectedUserId) continue;
 
-                try {
-                  // KRİTİK DÜZELTME: Karşılaştırmayı String tipinde yap
-                  final matchedUser = _dbUsers.firstWhere((user) => user.id == pingId);
-                  markerName = (matchedUser.data() as Map<String, dynamic>)['name'] ?? "İsimsiz";
-                } catch (e) {
-                  markerName = "Bilinmeyen ($pingId)"; // ID'yi görelim ki hata anlaşılsın
+                if (!pingedUserIds.contains(pingId) && data['location'] is GeoPoint) {
+                  pingedUserIds.add(pingId);
+                  GeoPoint geoPoint = data['location'];
+                  String markerName = "Kullanıcı";
+
+                  try {
+                    final matchedUser = _dbUsers.firstWhere((user) => user.id == pingId);
+                    markerName = (matchedUser.data() as Map<String, dynamic>)['name'] ?? "İsimsiz";
+                  } catch (e) {
+                    markerName = "Bilinmeyen ($pingId)";
+                  }
+
+                  allMarkers.add(
+                    Marker(
+                      point: LatLng(geoPoint.latitude, geoPoint.longitude),
+                      width: 100, height: 100,
+                      child: Column(
+                        children: [
+                          const Icon(Icons.warning, color: Colors.red, size: 40),
+                          Container(
+                            padding: const EdgeInsets.all(2),
+                            color: Colors.white70,
+                            child: Text(markerName, style: const TextStyle(fontSize: 10, fontWeight: FontWeight.bold)),
+                          ),
+                        ],
+                      ),
+                    ),
+                  );
                 }
+              }
+            }
 
+            for (var userDoc in _dbUsers) {
+              if (userDoc.id == _selectedUserId) continue;
+              if (pingedUserIds.contains(userDoc.id)) continue;
+
+              final userData = userDoc.data() as Map<String, dynamic>;
+              GeoPoint? lastLocation = userData['last_location'];
+              String markerName = userData['name'] ?? "İsimsiz";
+
+              if (lastLocation != null) {
                 allMarkers.add(
                   Marker(
-                    point: LatLng(geoPoint.latitude, geoPoint.longitude),
+                    point: LatLng(lastLocation.latitude, lastLocation.longitude),
                     width: 100, height: 100,
                     child: Column(
                       children: [
