@@ -4,11 +4,11 @@ import 'package:latlong2/latlong.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter_map_tile_caching/flutter_map_tile_caching.dart';
-import 'dart:async'; // Stream için gerekli
+import 'dart:async';
 
 import '../services/firebase_service.dart';
 import '../services/location_cache_service.dart';
-import '../services/location_service.dart'; // YENİ SERVİSİNİ EKLEDİK
+import '../services/location_service.dart';
 
 class CampusMapScreen extends StatefulWidget {
   const CampusMapScreen({super.key});
@@ -18,40 +18,57 @@ class CampusMapScreen extends StatefulWidget {
 }
 
 class _CampusMapScreenState extends State<CampusMapScreen> {
-  // --- SERVİSLER ---
   final LocationCacheService _cacheService = LocationCacheService();
   final FirebaseService _firebaseService = FirebaseService();
-  final LocationService _locationService = LocationService(); // YENİ SERVİS
+  final LocationService _locationService = LocationService();
 
-  // --- DEĞİŞKENLER ---
+  List<DocumentSnapshot> _dbUsers = [];
+  String? _selectedUserId;
+  bool _isUsersLoading = true;
+
   LatLng? myLiveLocation;
   LatLng _cachedMapPosition = const LatLng(40.7410, 30.3330);
   bool _isSimulating = false;
-
-  // GÖREV 2: Uygulamayı İşlevsiz Bırakma Kilidi
   bool _hasLocationPermission = true;
+  bool _sosSent = false;
 
-  bool _sosSent = false; // Kullanıcı sinyal gönderdi mi?
-
-  // Canlı GPS Dinleyicisi
   StreamSubscription<Position>? _positionStreamSubscription;
 
   @override
   void initState() {
     super.initState();
-    _initializeLocationSystem();
+    _initializeSystem();
   }
 
   @override
   void dispose() {
-    _positionStreamSubscription?.cancel(); // Bellek sızıntısını önlemek için
+    _positionStreamSubscription?.cancel();
     super.dispose();
   }
 
-  // Hem önbelleği hem canlı GPS'i sırayla başlatan sistem
-  Future<void> _initializeLocationSystem() async {
+  Future<void> _initializeSystem() async {
+    await _fetchUsersFromDb();
     await _loadLastKnownLocation();
     await _determinePosition();
+  }
+
+  Future<void> _fetchUsersFromDb() async {
+    try {
+      var snapshot = await FirebaseFirestore.instance
+          .collection('users')
+          .where('group_id', isEqualTo: 'aile_grubu_1')
+          .get();
+
+      setState(() {
+        _dbUsers = snapshot.docs;
+        if (_dbUsers.isNotEmpty) {
+          _selectedUserId = _dbUsers[0].id;
+        }
+        _isUsersLoading = false;
+      });
+    } catch (e) {
+      setState(() => _isUsersLoading = false);
+    }
   }
 
   Future<void> _loadLastKnownLocation() async {
@@ -63,47 +80,40 @@ class _CampusMapScreenState extends State<CampusMapScreen> {
     }
   }
 
-  // --- GÜNCELLENEN FONKSİYON: İzin Kontrolü ve Optimize Canlı Takip ---
   Future<void> _determinePosition() async {
-    // 1. İZİN KONTROLÜ (GÖREV 2)
     bool hasPermission = await _locationService.checkAndRequestPermission();
-
     setState(() {
       _hasLocationPermission = hasPermission;
     });
+    if (!hasPermission) return;
 
-    // GUARD YAPISI: İzin yoksa fonksiyonu tamamen durdur.
-    if (!hasPermission) {
-      print("🚨 GUARD: İzin verilmedi, sistem kilitlendi.");
-      return;
-    }
-
-    // 2. ENERJİ OPTİMİZASYONLU CANLI TAKİP (GÖREV 1 ve 4)
-    // Sadece ilk konumu almak yerine kullanıcının 25 metre hareket etmesini dinliyoruz.
     _positionStreamSubscription = _locationService.getOptimizedLocationStream().listen((Position position) {
-      print("📍 DEDEKTİF (OPTİMİZE): GPS Konumu Güncellendi! ${position.latitude}, ${position.longitude}");
-
       setState(() {
         myLiveLocation = LatLng(position.latitude, position.longitude);
-        _cachedMapPosition = myLiveLocation!; // Merkeze al
+        _cachedMapPosition = myLiveLocation!;
       });
     });
   }
 
   Future<void> _simulateEmergency() async {
+    if (_selectedUserId == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text("Lütfen önce bir kullanıcı seçin!")),
+      );
+      return;
+    }
+
     setState(() => _isSimulating = true);
 
     try {
       final targetPos = myLiveLocation ?? _cachedMapPosition;
-
       await _firebaseService.sendEmergencyPing(
-          "demo_user_ali",
+          _selectedUserId!,
           "aile_grubu_1",
           targetPos.latitude,
           targetPos.longitude
       );
 
-      // SİNYAL BAŞARIYLA GİTTİĞİNDE DURUMU GÜNCELLE
       setState(() {
         _sosSent = true;
       });
@@ -111,7 +121,7 @@ class _CampusMapScreenState extends State<CampusMapScreen> {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
-            content: Text("DURUMUNUZ BİLDİRİLDİ! Artık diğerlerini görebilirsiniz."),
+            content: Text("DURUMUNUZ BİLDİRİLDİ! Diğerleri görünüyor."),
             backgroundColor: Colors.green,
           ),
         );
@@ -129,87 +139,107 @@ class _CampusMapScreenState extends State<CampusMapScreen> {
 
   @override
   Widget build(BuildContext context) {
-    // --- GÖREV 2: İZİN YOKSA UYGULAMAYI İŞLEVSİZ BIRAKMA (KİLİT EKRANI) ---
     if (!_hasLocationPermission) {
       return Scaffold(
         body: Center(
-          child: Padding(
-            padding: const EdgeInsets.all(20.0),
-            child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                const Icon(Icons.location_off, size: 80, color: Colors.red),
-                const SizedBox(height: 20),
-                const Text(
-                  "Konum İzni Gerekli!",
-                  style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
-                ),
-                const SizedBox(height: 10),
-                const Text(
-                  "Afet anında size ulaşılabilmesi için bu uygulamanın konum iznine 'Her Zaman' veya 'Kullanırken' şeklinde izin vermelisiniz. Aksi takdirde uygulama kullanılamaz.",
-                  textAlign: TextAlign.center,
-                ),
-                const SizedBox(height: 30),
-                ElevatedButton.icon(
-                  onPressed: _initializeLocationSystem,
-                  icon: const Icon(Icons.refresh),
-                  label: const Text("İzni Tekrar İste / Ayarları Aç"),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: Colors.red[800],
-                    foregroundColor: Colors.white,
-                  ),
-                )
-              ],
-            ),
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              const Icon(Icons.location_off, size: 80, color: Colors.red),
+              const Text("Konum İzni Gerekli!", style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold)),
+              ElevatedButton(onPressed: () => _initializeSystem(), child: const Text("İzni Tekrar İste"))
+            ],
           ),
         ),
       );
     }
 
-    // --- İZİN VARSA NORMAL HARİTA EKRANI ---
     final currentCenter = myLiveLocation ?? _cachedMapPosition;
+
+    // SEÇİLİ KULLANICININ İSMİNİ BULMA (Mavi Pin Altı İçin)
+    String mySelectedName = "Seçili Kullanıcı";
+    if (_selectedUserId != null && _dbUsers.isNotEmpty) {
+      try {
+        final me = _dbUsers.firstWhere((u) => u.id == _selectedUserId);
+        mySelectedName = (me.data() as Map<String, dynamic>)['name'] ?? "Ben";
+      } catch (e) {}
+    }
 
     return Scaffold(
       appBar: AppBar(
         title: const Text("Afet İletişim"),
         backgroundColor: Colors.red[800],
         foregroundColor: Colors.white,
+        actions: [
+          if (!_isUsersLoading && _dbUsers.isNotEmpty)
+            DropdownButton<String>(
+              dropdownColor: Colors.red[800],
+              value: _selectedUserId,
+              style: const TextStyle(color: Colors.white),
+              items: _dbUsers.map((doc) {
+                final data = doc.data() as Map<String, dynamic>;
+                return DropdownMenuItem(value: doc.id, child: Text(data['name'] ?? 'Bilinmeyen'));
+              }).toList(),
+              onChanged: (val) => setState(() {
+                _selectedUserId = val;
+                _sosSent = false; // Kullanıcı değişince haritayı sıfırla
+              }),
+            )
+        ],
       ),
       body: StreamBuilder<QuerySnapshot>(
         stream: _firebaseService.getEmergencyPings("aile_grubu_1"),
         builder: (context, snapshot) {
-
           List<Marker> allMarkers = [];
 
+          // 1. MAVİ PİN (SEÇİLİ KULLANICI - İSİMLİ)
           allMarkers.add(
             Marker(
               point: currentCenter,
-              width: 60,
-              height: 60,
-              child: const Icon(Icons.person_pin_circle, color: Colors.blueAccent, size: 45),
+              width: 100, height: 100,
+              child: Column(
+                children: [
+                  const Icon(Icons.person_pin_circle, color: Colors.blueAccent, size: 45),
+                  Text(mySelectedName, style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Colors.blue)),
+                ],
+              ),
             ),
           );
 
-          // 2. DİĞERLERİNİ GÖSTERME MANTIĞI (Filtreli)
-          // Şart: Sadece kullanıcı SOS gönderdiyse (_sosSent == true) göster
+          // 2. KIRMIZI PİNLER (DİĞERLERİ)
           if (_sosSent && snapshot.hasData) {
             for (var doc in snapshot.data!.docs) {
               final data = doc.data() as Map<String, dynamic>;
 
-              // KURAL 1: Gelen veri senin kendi user_id'n olmamalı (kırmızı pin gelmesin)
-              // KURAL 2: Veri bir GeoPoint olmalı
-              if (data['user_id'] != "demo_user_ali" &&
-                  data['location'] != null &&
-                  data['location'] is GeoPoint) {
+              // KRİTİK DÜZELTME: Veri tabanından gelen ID'yi metne çevirip karşılaştır
+              final String pingId = data['user_id'].toString();
 
+              if (pingId != _selectedUserId && data['location'] is GeoPoint) {
                 GeoPoint geoPoint = data['location'];
+                String markerName = "Kullanıcı";
+
+                try {
+                  // KRİTİK DÜZELTME: Karşılaştırmayı String tipinde yap
+                  final matchedUser = _dbUsers.firstWhere((user) => user.id == pingId);
+                  markerName = (matchedUser.data() as Map<String, dynamic>)['name'] ?? "İsimsiz";
+                } catch (e) {
+                  markerName = "Bilinmeyen ($pingId)"; // ID'yi görelim ki hata anlaşılsın
+                }
 
                 allMarkers.add(
                   Marker(
                     point: LatLng(geoPoint.latitude, geoPoint.longitude),
-                    width: 50,
-                    height: 50,
-                    child: const Icon(Icons.warning, color: Colors.red, size: 40),
+                    width: 100, height: 100,
+                    child: Column(
+                      children: [
+                        const Icon(Icons.warning, color: Colors.red, size: 40),
+                        Container(
+                          padding: const EdgeInsets.all(2),
+                          color: Colors.white70,
+                          child: Text(markerName, style: const TextStyle(fontSize: 10, fontWeight: FontWeight.bold)),
+                        ),
+                      ],
+                    ),
                   ),
                 );
               }
@@ -217,14 +247,10 @@ class _CampusMapScreenState extends State<CampusMapScreen> {
           }
 
           return FlutterMap(
-            options: MapOptions(
-              initialCenter: currentCenter,
-              initialZoom: 15.0,
-            ),
+            options: MapOptions(initialCenter: currentCenter, initialZoom: 15.0),
             children: [
               TileLayer(
                 urlTemplate: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
-                userAgentPackageName: 'com.example.earthflu',
                 tileProvider: FMTCStore('kampus_haritasi').getTileProvider(),
               ),
               MarkerLayer(markers: allMarkers),
@@ -236,13 +262,7 @@ class _CampusMapScreenState extends State<CampusMapScreen> {
       floatingActionButton: FloatingActionButton.extended(
         onPressed: _isSimulating ? null : _simulateEmergency,
         backgroundColor: Colors.red,
-        icon: _isSimulating
-            ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2))
-            : const Icon(Icons.warning_amber_rounded, color: Colors.white),
-        label: Text(
-          _isSimulating ? "SİNYAL GÖNDERİLİYOR..." : "DEPREM SİMÜLASYONU",
-          style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.white),
-        ),
+        label: Text(_isSimulating ? "SİNYAL GÖNDERİLİYOR..." : "DEPREM SİMÜLASYONU"),
       ),
     );
   }
