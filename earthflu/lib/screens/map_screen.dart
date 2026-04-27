@@ -33,17 +33,45 @@ class _CampusMapScreenState extends State<CampusMapScreen> {
   bool _sosSent = false;
 
   StreamSubscription<Position>? _positionStreamSubscription;
+  Timer? _emergencyCheckTimer;
 
   @override
   void initState() {
     super.initState();
     _initializeSystem();
+    _startEmergencyCheck();
   }
 
   @override
   void dispose() {
     _positionStreamSubscription?.cancel();
+    _emergencyCheckTimer?.cancel();
     super.dispose();
+  }
+
+  void _startEmergencyCheck() {
+    _emergencyCheckTimer = Timer.periodic(const Duration(seconds: 10), (timer) async {
+      try {
+        final snapshot = await FirebaseFirestore.instance
+            .collection('emergency_pings')
+            .where('group_id', isEqualTo: 'aile_grubu_1')
+            .get();
+
+        if (mounted) {
+          if (snapshot.docs.isNotEmpty && !_sosSent) {
+            setState(() {
+              _sosSent = true;
+            });
+          } else if (snapshot.docs.isEmpty && _sosSent) {
+            setState(() {
+              _sosSent = false;
+            });
+          }
+        }
+      } catch (e) {
+        // Hata durumunda sessizce devam et
+      }
+    });
   }
 
   Future<void> _initializeSystem() async {
@@ -283,6 +311,7 @@ class _CampusMapScreenState extends State<CampusMapScreen> {
             children: [
               TileLayer(
                 urlTemplate: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+                userAgentPackageName: 'com.earthline.earthflu',
                 tileProvider: FMTCStore('kampus_haritasi').getTileProvider(),
               ),
               MarkerLayer(markers: allMarkers),
